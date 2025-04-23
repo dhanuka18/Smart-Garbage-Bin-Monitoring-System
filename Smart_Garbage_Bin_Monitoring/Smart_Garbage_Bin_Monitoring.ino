@@ -1,0 +1,209 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ESP32Servo.h>
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+
+// 🚀 Ultrasonic Sensor Pins
+#define TRIG_LID_PIN 27
+#define ECHO_LID_PIN 26
+#define TRIG_GARBAGE_PIN 5
+#define ECHO_GARBAGE_PIN 18
+
+// 🚀 Servo Motor Pin (Lid)
+#define SERVO_PIN 13
+
+// 🚀 LED Indicators
+#define RED_LED_PIN 32
+#define GREEN_LED_PIN 12
+
+// 🚀 MQ-135 Gas Sensor Pin
+#define MQ135_PIN 35
+
+// 🚀 GPS Module
+#define RXD2 21 // ESP32 RX2 (connect to GPS TX)
+#define TXD2 17 // ESP32 TX2 (connect to GPS RX)
+
+// 🚀 Bin Configuration
+#define BIN_HEIGHT 50
+#define FULL_THRESHOLD 35
+#define OPEN_THRESHOLD 20
+#define GAS_THRESHOLD 300
+
+// 🚀 Wi-Fi Credentials
+const char* WIFI_SSID = "Dialog 4G 269";
+const char* WIFI_PASSWORD = "38d78Cb7";
+
+// 🚀 Telegram Bot Details
+const String BOT_TOKEN = "7924320592:AAG2z9exz9QY_Gi10mSiuDM0jEeDYceXgVw";
+const String CHAT_ID = "1339096116";
+
+Servo lidServo;
+bool alertSent = false;
+bool gasAlertSent = false;
+
+// GPS Module
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(2);
+
+void setup() {
+    Serial.begin(115200);
+    gpsSerial.begin(9600, SERIAL_8N1, RXD2, TXD2);
+
+    // 🚀 Initialize Servo
+    lidServo.setPeriodHertz(50);
+    lidServo.attach(SERVO_PIN, 500, 2500);
+    lidServo.write(0);
+
+    // 🚀 Configure Pins
+    pinMode(TRIG_LID_PIN, OUTPUT);
+    pinMode(ECHO_LID_PIN, INPUT);
+    pinMode(TRIG_GARBAGE_PIN, OUTPUT);
+    pinMode(ECHO_GARBAGE_PIN, INPUT);
+    pinMode(RED_LED_PIN, OUTPUT);
+    pinMode(GREEN_LED_PIN, OUTPUT);
+
+    // 🚀 Connect to Wi-Fi with Auto-Reconnect
+    Serial.println("🚀 Connecting to WiFi...");
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8,8,8,8)); // Use Google DNS
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.print(".");
+    }
+    Serial.println("\n✅ WiFi Connected!");
+}
+
+// 🔹 Function to Measure Distance
+int getDistance(int trigPin, int echoPin) {
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+
+    long duration = pulseInLong(echoPin, HIGH, 30000);
+    if (duration == 0) return BIN_HEIGHT;
+    return duration * 0.034 / 2;
+}
+
+// 🔹 Function to Measure Garbage Height
+int getGarbageHeight() {
+    int distance = getDistance(TRIG_GARBAGE_PIN, ECHO_GARBAGE_PIN);
+    int garbageHeight = BIN_HEIGHT - distance;
+    return (garbageHeight > 0) ? garbageHeight : 0;
+}
+
+// 🔹 Function to Read MQ-135 Gas Sensor
+int getGasLevel() {
+    int gasValue = analogRead(MQ135_PIN);
+    Serial.print("🔥 Gas Level: ");
+    Serial.println(gasValue);
+    return gasValue;
+}
+
+// 🔹 Function to Read GPS Location
+String getGPSLocation() {
+    while (gpsSerial.available() > 0) {
+        gps.encode(gpsSerial.read());
+    }
+
+    if (gps.location.isValid()) {
+        String latitude = String(gps.location.lat(), 6);
+        String longitude = String(gps.location.lng(), 6);
+        Serial.print("📍 GPS Location: ");
+        Serial.print(latitude);
+        Serial.print(", ");
+        Serial.println(longitude);
+        return "📍 Location: " + latitude + ", " + longitude;
+    } else {
+        return "⚠️ GPS signal not available!";
+    }
+}
+
+// 🔹 Function to Send Telegram Alert (Fixed)
+void sendTelegramAlert(String message) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ No Wi-Fi! Cannot send alert.");
+        return;
+    }
+
+    HTTPClient http;
+    String url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
+
+    http.begin(url);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    String postData = "chat_id=" + CHAT_ID + "&text=" + message;
+    int httpCode = http.POST(postData);
+
+    if (httpCode > 0) {
+        Serial.println("📨 Telegram Alert Sent!");
+        Serial.println(http.getString());  // Print Telegram API response
+    } else {
+        Serial.print("❌ Failed to Send Alert! Error Code: ");
+        Serial.println(httpCode);
+    }
+
+    http.end();
+}
+
+void loop() {
+    // 🚀 Reconnect Wi-Fi if Disconnected
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("❌ Wi-Fi Disconnected! Reconnecting...");
+        WiFi.disconnect();
+        WiFi.reconnect();
+        delay(5000);
+    }
+
+    int garbageLevel = getGarbageHeight();
+    int personDistance = getDistance(TRIG_LID_PIN, ECHO_LID_PIN);
+    int gasLevel = getGasLevel();
+    String gpsLocation = getGPSLocation();
+
+    Serial.print("Garbage Height: ");
+    Serial.print(garbageLevel);
+    Serial.println(" cm");
+
+    // 🚀 Open Lid if Person Detected
+    if (personDistance < OPEN_THRESHOLD) {
+        Serial.println("🚪 Person Detected - Opening Lid...");
+        lidServo.write(90);
+        delay(5000);
+        Serial.println("🔒 Closing Lid...");
+        lidServo.write(0);
+    }
+
+    // 🚀 Garbage Level Check
+    if (garbageLevel > FULL_THRESHOLD) {
+        digitalWrite(RED_LED_PIN, HIGH);
+        digitalWrite(GREEN_LED_PIN, LOW);
+        Serial.println("⚠️ Garbage Bin is Full!");
+
+        if (!alertSent) {
+            sendTelegramAlert("⚠️ Alert: Garbage Bin is Full! 🚮\n" + gpsLocation);
+            alertSent = true;
+        }
+    } else {
+        digitalWrite(RED_LED_PIN, LOW);
+        digitalWrite(GREEN_LED_PIN, HIGH);
+        Serial.println("✅ Bin is Safe.");
+        alertSent = false;
+    }
+
+    // 🚀 Gas Level Check
+    if (gasLevel > GAS_THRESHOLD) {
+        Serial.println("⚠️ High Gas Levels Detected!");
+
+        if (!gasAlertSent) {
+            sendTelegramAlert("⚠️ Alert: High Gas Levels Detected in Garbage Bin! 🛑\n" + gpsLocation);
+            gasAlertSent = true;
+        }
+    } else {
+        gasAlertSent = false;
+    }
+
+    delay(5000);
+}
